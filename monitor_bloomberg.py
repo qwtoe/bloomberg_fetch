@@ -5,16 +5,21 @@ import time
 import os
 import datetime
 import email.utils
+import sys
 
 # ==================== 加载配置 ====================
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 def load_config(path="config.json"):
-    if not os.path.exists(path):
+    # 始终基于脚本所在目录查找配置，避免 nohup 工作目录问题
+    full_path = os.path.join(SCRIPT_DIR, path)
+    if not os.path.exists(full_path):
         raise FileNotFoundError(
-            f"配置文件不存在: {path}\n"
+            f"配置文件不存在: {full_path}\n"
             f"请复制 config.example.json 为 config.json 并填入你的密钥。"
         )
-    with open(path, "r", encoding="utf-8") as f:
+    with open(full_path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 CONFIG = load_config()
@@ -38,10 +43,13 @@ DEEPSEEK_MODEL = CONFIG["deepseek"]["model"]
 DEEPSEEK_BASE_URL = CONFIG["deepseek"]["base_url"]
 
 # 本地缓存（每行一个已推送的新闻 ID）
-CACHE_FILE = "pushed_news_ids.txt"
+CACHE_FILE = os.path.join(SCRIPT_DIR, "pushed_news_ids.txt")
 
 # 轮询间隔（秒）
 POLL_INTERVAL = CONFIG["monitor"]["poll_interval_seconds"]
+
+# 冷启动时间窗口（第一次运行时只推送最近 N 小时的新闻）
+COLD_START_HOURS = 1
 
 # ==================== 功能函数 ====================
 
@@ -76,9 +84,9 @@ def send_telegram(text):
     try:
         r = requests.post(url, json=payload, timeout=15)
         r.raise_for_status()
-        print("  → Telegram 消息发送成功")
+        print("  → Telegram 消息发送成功", flush=True)
     except Exception as e:
-        print(f"  → Telegram 发送失败: {e}")
+        print(f"  → Telegram 发送失败: {e}", flush=True)
 
 def verify_deepseek():
     """每次调用前验证 DeepSeek 模型连通性"""
@@ -98,12 +106,12 @@ def verify_deepseek():
         data = r.json()
         if "error" in data:
             err_msg = data["error"].get("message", str(data["error"]))
-            print(f"DeepSeek 验证失败: {err_msg}")
+            print(f"DeepSeek 验证失败: {err_msg}", flush=True)
             return False
-        print("DeepSeek 连通性验证通过")
+        print("DeepSeek 连通性验证通过", flush=True)
         return True
     except Exception as e:
-        print(f"DeepSeek 验证异常: {e}")
+        print(f"DeepSeek 验证异常: {e}", flush=True)
         return False
 
 def translate_title(title):
@@ -134,25 +142,30 @@ def translate_title(title):
         data = r.json()
         if "error" in data:
             err_msg = data["error"].get("message", str(data["error"]))
-            print(f"DeepSeek 翻译失败: {err_msg}")
+            print(f"DeepSeek 翻译失败: {err_msg}", flush=True)
             return f"{title} (翻译失败)"
 
         translated = data["choices"][0]["message"]["content"].strip()
         translated = translated.strip('"').strip("'")
         return translated
     except Exception as e:
-        print(f"DeepSeek 翻译异常: {e}")
+        print(f"DeepSeek 翻译异常: {e}", flush=True)
         return f"{title} (翻译失败)"
+
+def get_entry_datetime(entry):
+    """提取 entry 的发布时间，解析失败返回极早时间（确保排在最前）"""
+    try:
+        return email.utils.parsedate_to_datetime(entry.published)
+    except Exception:
+        return datetime.datetime.min.replace(tzinfo=datetime.timezone.utc)
 
 def is_recent(entry, hours=RECENT_HOURS):
     """判断新闻发布时间是否在指定小时数内"""
-    try:
-        dt_utc = email.utils.parsedate_to_datetime(entry.published)
-        age = datetime.datetime.now(datetime.timezone.utc) - dt_utc
-        return age <= datetime.timedelta(hours=hours)
-    except Exception:
-        # 解析失败时，保守处理：视为旧闻
+    dt_utc = get_entry_datetime(entry)
+    if not dt_utc:
         return False
+    age = datetime.datetime.now(datetime.timezone.utc) - dt_utc
+    return age <= datetime.timedelta(hours=hours)
 
 def push_entry(entry, translate=True):
     """处理并推送单条新闻"""
@@ -168,7 +181,7 @@ def push_entry(entry, translate=True):
     except Exception:
         pub_date_bj = pub_date
 
-    print(f"\n检测到新新闻: {title_en}")
+    print(f"\n检测到新新闻: {title_en}", flush=True)
 
     # 翻译标题（如果 DeepSeek 可用）
     if translate:
@@ -184,70 +197,81 @@ def push_entry(entry, translate=True):
     )
 
     send_telegram(message)
-    print(f"  已推送: {title_zh}")
+    print(f"  已推送: {title_zh}", flush=True)
 
 # ==================== 主程序 ====================
 
 def cleanup_old_files():
-    """清理旧的/无用的文件"""
+    """清理旧的/无用的文件（注意：不删除当前进程正在写入的日志文件）"""
     # 删除旧的单条缓存（已废弃，现在使用 pushed_news_ids.txt）
-    old_cache = "last_news_id.txt"
+    old_cache = os.path.join(SCRIPT_DIR, "last_news_id.txt")
     if os.path.exists(old_cache):
         os.remove(old_cache)
-        print(f"已清理旧缓存: {old_cache}")
-
-    # 删除旧的日志文件（彻底清理，避免二进制残留或空字节污染）
-    log_file = "monitor.log"
-    if os.path.exists(log_file):
-        os.remove(log_file)
-        print(f"已删除旧日志: {log_file}")
+        print(f"已清理旧缓存: {old_cache}", flush=True)
 
 def monitor_bloomberg():
     cleanup_old_files()
-    print("开始监控彭博社实时新闻（每 30 分钟轮询一次）...")
+    print("开始监控彭博社实时新闻（每 30 分钟轮询一次）...", flush=True)
     pushed_ids = load_pushed_ids()
+
+    # 判断是否是冷启动（缓存为空）
+    is_cold_start = len(pushed_ids) == 0
+    if is_cold_start:
+        print(f"检测到冷启动，本轮仅推送过去 {COLD_START_HOURS} 小时内的新闻", flush=True)
 
     while True:
         try:
             feed = fetch_feed()
 
             if not feed.entries:
-                print("暂未抓取到内容，等待重试...")
+                print("暂未抓取到内容，等待重试...", flush=True)
                 time.sleep(POLL_INTERVAL)
                 continue
 
-            # 收集本轮未推送过的新闻（按 RSS 顺序，从旧到新）
-            new_entries = []
-            for entry in feed.entries:
-                if entry.id not in pushed_ids:
-                    new_entries.append(entry)
+            # 收集本轮未推送过的新闻
+            new_entries = [entry for entry in feed.entries if entry.id not in pushed_ids]
 
             if not new_entries:
-                print(f"[{time.strftime('%H:%M:%S')}] 暂无更新...")
+                print(f"[{time.strftime('%H:%M:%S')}] 暂无更新...", flush=True)
             else:
-                print(f"\n本轮发现 {len(new_entries)} 条缓存中未记录的新闻")
+                # 按发布时间从远到近排序（发布时间早的在前）
+                new_entries.sort(key=get_entry_datetime)
 
-                # 每轮只验证一次 DeepSeek 连通性，避免多条新闻时重复请求
+                print(f"\n本轮发现 {len(new_entries)} 条缓存中未记录的新闻", flush=True)
+
+                # 每轮只验证一次 DeepSeek 连通性
                 ds_available = verify_deepseek()
 
                 pushed_count = 0
                 skipped_count = 0
-                for entry in reversed(new_entries):  # 从旧到新处理，保证顺序
+                for entry in new_entries:
                     pushed_ids.add(entry.id)
-                    if is_recent(entry):
+
+                    # 冷启动时只用 1 小时窗口，之后用配置的 RECENT_HOURS
+                    time_limit = COLD_START_HOURS if is_cold_start else RECENT_HOURS
+
+                    if is_recent(entry, hours=time_limit):
                         push_entry(entry, translate=ds_available)
                         pushed_count += 1
-                        # 避免 Telegram 频率限制，每条消息间隔 1 秒
+                        # 避免 Telegram 频率限制
                         time.sleep(1)
                     else:
-                        print(f"  跳过旧闻（>{RECENT_HOURS}h）: {entry.title.replace(' - Bloomberg.com', '')}")
+                        title_short = entry.title.replace(" - Bloomberg.com", "")
+                        print(f"  跳过旧闻（>{time_limit}h）: {title_short}", flush=True)
                         skipped_count += 1
-                    # 每次处理后保存，防止中断导致重复推送/处理
+
+                    # 每次处理后保存，防止中断导致重复推送
                     save_pushed_ids(pushed_ids)
-                print(f"\n本轮处理完成: 推送 {pushed_count} 条, 跳过旧闻 {skipped_count} 条")
+
+                print(f"\n本轮处理完成: 推送 {pushed_count} 条, 跳过旧闻 {skipped_count} 条", flush=True)
+
+                # 冷启动只在第一轮生效，后续恢复正常
+                if is_cold_start:
+                    is_cold_start = False
+                    print(f"冷启动结束，后续将按 {RECENT_HOURS} 小时窗口过滤", flush=True)
 
         except Exception as e:
-            print(f"主循环发生错误: {e}")
+            print(f"主循环发生错误: {e}", flush=True)
 
         time.sleep(POLL_INTERVAL)
 
