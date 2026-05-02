@@ -1,0 +1,15 @@
+{
+    "telegram": {
+        "bot_token": "YOUR_TG_BOT_TOKEN_HERE",
+        "chat_id": "YOUR_CHAT_ID_HERE"
+    },
+    "deepseek": {
+        "api_key": "YOUR_DEEPSEEK_API_KEY_HERE",
+        "model": "deepseek-chat",
+        "base_url": "https://api.deepseek.com"
+    },
+    "monitor": {
+        "poll_interval_seconds": 1800,
+        "recent_hours": 4
+    }
+}
