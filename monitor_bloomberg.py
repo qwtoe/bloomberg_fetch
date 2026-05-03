@@ -27,7 +27,7 @@ CONFIG = load_config()
 # ==================== 配置区域 ====================
 
 # RSS 配置（when:12h 从源头过滤过去 12 小时的新闻，减少旧闻混入）
-RSS_URL = "https://news.google.com/rss/search?q=site:bloomberg.com+when:12h&hl=en-US&gl=US&ceid=US:en"
+RSS_URL = "https://news.google.com/rss/search?q=site:bloomberg.com+-"Profile+and+Biography"+when:12h&hl=en-US&gl=US&ceid=US:en"
 RSS_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
 # 时间阈值：只推送过去 N 小时内发布的新闻（单位：小时）
