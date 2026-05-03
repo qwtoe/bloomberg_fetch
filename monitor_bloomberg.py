@@ -27,7 +27,7 @@ CONFIG = load_config()
 # ==================== 配置区域 ====================
 
 # RSS 配置（when:12h 从源头过滤过去 12 小时的新闻，减少旧闻混入）
-RSS_URL = "https://news.google.com/rss/search?q=site:bloomberg.com+-"Profile+and+Biography"+when:12h&hl=en-US&gl=US&ceid=US:en"
+RSS_URL = 'https://news.google.com/rss/search?q=site:bloomberg.com+-"Profile+and+Biography"+when:12h&hl=en-US&gl=US&ceid=US:en'
 RSS_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
 # 时间阈值：只推送过去 N 小时内发布的新闻（单位：小时）
@@ -232,7 +232,9 @@ def monitor_bloomberg():
             new_entries = [entry for entry in feed.entries if entry.id not in pushed_ids]
 
             if not new_entries:
-                print(f"[{time.strftime('%H:%M:%S')}] 暂无更新...", flush=True)
+                msg = f"[{time.strftime('%H:%M:%S')}] 本轮暂无更新"
+                print(msg, flush=True)
+                send_telegram(msg)
             else:
                 # 按发布时间从远到近排序（发布时间早的在前）
                 new_entries.sort(key=get_entry_datetime)
@@ -263,7 +265,9 @@ def monitor_bloomberg():
                     # 每次处理后保存，防止中断导致重复推送
                     save_pushed_ids(pushed_ids)
 
-                print(f"\n本轮处理完成: 推送 {pushed_count} 条, 跳过旧闻 {skipped_count} 条", flush=True)
+                summary = f"\n本轮处理完成: 推送 {pushed_count} 条, 跳过旧闻 {skipped_count} 条"
+                print(summary, flush=True)
+                send_telegram(summary.strip())
 
                 # 冷启动只在第一轮生效，后续恢复正常
                 if is_cold_start:
