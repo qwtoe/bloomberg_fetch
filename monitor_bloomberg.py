@@ -45,6 +45,9 @@ DEEPSEEK_BASE_URL = CONFIG["deepseek"]["base_url"]
 # 本地缓存（每行一个已推送的新闻 ID）
 CACHE_FILE = os.path.join(SCRIPT_DIR, "pushed_news_ids.txt")
 
+# 标题缓存（解决 Google News 同一文章分配不同 ID 的问题）
+TITLE_CACHE_FILE = os.path.join(SCRIPT_DIR, "pushed_titles.txt")
+
 # 硬黑名单：标题包含这些关键词的直接跳过
 HARD_BLACKLIST = [
     "mercury",
@@ -79,6 +82,23 @@ def save_pushed_ids(pushed_ids):
     with open(CACHE_FILE, "w", encoding="utf-8") as f:
         for news_id in sorted(pushed_ids):
             f.write(news_id + "\n")
+
+def load_pushed_titles():
+    """加载已推送的新闻标题集合（解决 Google News 同一文章多 ID 问题）"""
+    if os.path.exists(TITLE_CACHE_FILE):
+        with open(TITLE_CACHE_FILE, "r", encoding="utf-8") as f:
+            return set(line.strip() for line in f if line.strip())
+    return set()
+
+def save_pushed_titles(pushed_titles):
+    """保存已推送的新闻标题集合到文件"""
+    with open(TITLE_CACHE_FILE, "w", encoding="utf-8") as f:
+        for title in sorted(pushed_titles):
+            f.write(title + "\n")
+
+def normalize_title(title):
+    """标准化标题用于去重（移除 Bloomberg 后缀、统一大小写）"""
+    return title.replace(" - Bloomberg.com", "").strip().lower()
 
 def fetch_feed():
     """使用 requests 获取 RSS 内容，再交给 feedparser 解析（避免默认 urllib 被拦截）"""
@@ -232,9 +252,10 @@ def monitor_bloomberg():
     cleanup_old_files()
     print("开始监控彭博社实时新闻（每 30 分钟轮询一次）...", flush=True)
     pushed_ids = load_pushed_ids()
+    pushed_titles = load_pushed_titles()
 
     # 判断是否是冷启动（缓存为空）
-    is_cold_start = len(pushed_ids) == 0
+    is_cold_start = len(pushed_ids) == 0 and len(pushed_titles) == 0
     if is_cold_start:
         print(f"检测到冷启动，本轮仅推送过去 {COLD_START_HOURS} 小时内的新闻", flush=True)
 
@@ -247,8 +268,12 @@ def monitor_bloomberg():
                 time.sleep(POLL_INTERVAL)
                 continue
 
-            # 收集本轮未推送过的新闻
-            new_entries = [entry for entry in feed.entries if entry.id not in pushed_ids]
+            # 收集本轮未推送过的新闻（ID 和标题双重去重）
+            new_entries = []
+            for entry in feed.entries:
+                norm = normalize_title(entry.title)
+                if entry.id not in pushed_ids and norm not in pushed_titles:
+                    new_entries.append(entry)
 
             if not new_entries:
                 msg = f"[{time.strftime('%H:%M:%S')}] 本轮暂无更新"
@@ -268,6 +293,7 @@ def monitor_bloomberg():
                 blocked_count = 0
                 for entry in new_entries:
                     pushed_ids.add(entry.id)
+                    pushed_titles.add(normalize_title(entry.title))
 
                     # 硬黑名单拦截
                     if is_blacklisted(entry):
@@ -275,6 +301,7 @@ def monitor_bloomberg():
                         print(f"  拦截黑名单: {title_short}", flush=True)
                         blocked_count += 1
                         save_pushed_ids(pushed_ids)
+                        save_pushed_titles(pushed_titles)
                         continue
 
                     # 冷启动时只用 1 小时窗口，之后用配置的 RECENT_HOURS
@@ -292,6 +319,7 @@ def monitor_bloomberg():
 
                     # 每次处理后保存，防止中断导致重复推送
                     save_pushed_ids(pushed_ids)
+                    save_pushed_titles(pushed_titles)
 
                 summary = f"\n本轮处理完成: 推送 {pushed_count} 条, 跳过旧闻 {skipped_count} 条, 拦截黑名单 {blocked_count} 条"
                 print(summary, flush=True)
