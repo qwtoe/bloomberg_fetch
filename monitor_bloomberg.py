@@ -27,7 +27,7 @@ CONFIG = load_config()
 # ==================== 配置区域 ====================
 
 # RSS 配置（when:12h 从源头过滤过去 12 小时的新闻，减少旧闻混入）
-RSS_URL = 'https://news.google.com/rss/search?q=site:bloomberg.com+-"Profile+and+Biography"+when:12h&hl=en-US&gl=US&ceid=US:en'
+RSS_URL = 'https://news.google.com/rss/search?q=site:bloomberg.com/news+-"Profile+and+Biography"+when:12h&hl=en-US&gl=US&ceid=US:en'
 RSS_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
 # 时间阈值：只推送过去 N 小时内发布的新闻（单位：小时）
@@ -44,6 +44,20 @@ DEEPSEEK_BASE_URL = CONFIG["deepseek"]["base_url"]
 
 # 本地缓存（每行一个已推送的新闻 ID）
 CACHE_FILE = os.path.join(SCRIPT_DIR, "pushed_news_ids.txt")
+
+# 硬黑名单：标题包含这些关键词的直接跳过
+HARD_BLACKLIST = [
+    "mercury",
+    "subscription",
+    "profile and biography",
+    "terms of service",
+    "privacy policy",
+    "are you a robot",
+    "customer support",
+    "newsletter",
+    "briefing",
+    "advertising",
+]
 
 # 轮询间隔（秒）
 POLL_INTERVAL = CONFIG["monitor"]["poll_interval_seconds"]
@@ -152,6 +166,11 @@ def translate_title(title):
         print(f"DeepSeek 翻译异常: {e}", flush=True)
         return f"{title} (翻译失败)"
 
+def is_blacklisted(entry):
+    """检查标题是否命中硬黑名单（大小写不敏感）"""
+    title_lower = entry.title.lower()
+    return any(kw.lower() in title_lower for kw in HARD_BLACKLIST)
+
 def get_entry_datetime(entry):
     """提取 entry 的发布时间，解析失败返回极早时间（确保排在最前）"""
     try:
@@ -246,8 +265,17 @@ def monitor_bloomberg():
 
                 pushed_count = 0
                 skipped_count = 0
+                blocked_count = 0
                 for entry in new_entries:
                     pushed_ids.add(entry.id)
+
+                    # 硬黑名单拦截
+                    if is_blacklisted(entry):
+                        title_short = entry.title.replace(" - Bloomberg.com", "")
+                        print(f"  拦截黑名单: {title_short}", flush=True)
+                        blocked_count += 1
+                        save_pushed_ids(pushed_ids)
+                        continue
 
                     # 冷启动时只用 1 小时窗口，之后用配置的 RECENT_HOURS
                     time_limit = COLD_START_HOURS if is_cold_start else RECENT_HOURS
@@ -265,7 +293,7 @@ def monitor_bloomberg():
                     # 每次处理后保存，防止中断导致重复推送
                     save_pushed_ids(pushed_ids)
 
-                summary = f"\n本轮处理完成: 推送 {pushed_count} 条, 跳过旧闻 {skipped_count} 条"
+                summary = f"\n本轮处理完成: 推送 {pushed_count} 条, 跳过旧闻 {skipped_count} 条, 拦截黑名单 {blocked_count} 条"
                 print(summary, flush=True)
                 send_telegram(summary.strip())
 
